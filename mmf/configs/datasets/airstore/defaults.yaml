@@ -1,0 +1,19 @@
+# Checkout projects/fb/mmbt/config/eccv_misinfo/defaults.yaml for full example
+# and fbcode/faim/mmf/mmf/datasets/fb/builders/hive/builder.py
+# for details on configuration
+dataset_config:
+  airstore:
+    data_dir: ${env.data_dir}
+    params:
+      namespace: foo
+      table: bar
+      partitions: null
+    processors:
+      batch_processor:
+        type: foo
+        params: {}
+      prediction_processor:
+        type: prediction.argmax
+        params:
+          id_key: id
+          result_key: answer

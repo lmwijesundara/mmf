@@ -261,8 +261,8 @@ class ResNet152ImageEncoder(Encoder):
             self.pool = pool_func((3, 2))
         elif config.num_output_features == 8:
             self.pool = pool_func((4, 2))
-        elif config.num_output_features == 9:
-            self.pool = pool_func((3, 3))
+        elif config.num_output_features == 49:
+            self.pool = pool_func((7, 7))
 
         self.out_dim = 2048
 

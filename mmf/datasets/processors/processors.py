@@ -75,17 +75,23 @@ import re
 import warnings
 from collections import Counter, defaultdict
 from dataclasses import dataclass
-from typing import Any, Dict, Union
+from io import BytesIO
+from typing import Any, Dict, Type, Union
 
 import numpy as np
 import torch
 from mmf.common.registry import registry
+from mmf.common.sample import Sample, SampleList
 from mmf.common.typings import ProcessorConfigType
 from mmf.utils.configuration import get_mmf_cache_dir, get_mmf_env
 from mmf.utils.distributed import is_master, synchronize
 from mmf.utils.file_io import PathManager
 from mmf.utils.text import VocabDict
 from mmf.utils.vocab import Vocab, WordToVectorDict
+from PIL import Image, ImageFile
+
+
+ImageFile.LOAD_TRUNCATED_IMAGES = True
 
 
 logger = logging.getLogger(__name__)
@@ -1546,3 +1552,130 @@ class DETRImageAndTargetProcessor(BaseProcessor):
             raise Exception(f"unknown dataset_type: {dataset_type}")
 
         return {"img": img, "target": target}
+
+
+@registry.register_processor("features_with_text")
+class FeaturesWithTextBatchProcessor(BatchProcessor):
+    """Batch processor specific for datasets which have features
+    and some text channels. Depending on which feature and
+    text processor are defined, it returns back a SampleList
+    that is usable by transformer based models.
+
+    In configuration, specify feature column as feature_key and
+    text columns as text_keys. Additionally, unique id column can
+    be specified as id_key and the labels as label_key.
+
+    As of now, all of the text from text_keys column is concatenated
+    and passed as single string from the text processor that
+    has been defined.
+
+    If you want to define a custom version of this processor, follow
+    the steps:
+    - Inherit this class and register a new processor for it
+    - Override the method you want among all of the `process_` methods
+    - If you add a new `process_` method for processing some new column
+    make sure to override the pipeline property to include that
+    method into the pipeline.
+
+    You can check an example override below in ImageWithTextBatchProcessor.
+    """
+
+    def __init__(self, config, *args, **kwargs):
+        super().__init__(config, *args, **kwargs)
+        self._text_keys = config.text_keys
+        # If not list, convert to list. Note that, we can't directly
+        # compare OmegaConf.ListConfig to list due to OmegaConf limitation
+        if not isinstance(self._text_keys, collections.abc.MutableSequence):
+            self._text_keys = [self._text_keys]
+        # Convert to container list
+        self._text_keys = list(self._text_keys)
+
+        if "feature_key" not in config:
+            warnings.warn(
+                """Feature key is missing. This is only intended to be used
+                for ImageWithTextBatchProcessor without any feature inputs."""
+            )
+        self._feature_key = config.get("feature_key", None)
+
+        if "label_key" not in config:
+            warnings.warn(
+                "Label key is missing. For downstream tasks this might be an issue."
+            )
+        self._label_key = config.get("label_key", None)
+
+        self._id_key = config.get("id_key", None)
+
+    @property
+    def pipeline(self):
+        if self._feature_key is not None:
+            processors = [self.process_features]
+        else:
+            processors = []
+        processors.extend([self.process_text])
+        if self._label_key:
+            processors.append(self.process_targets)
+        return processors
+
+    def process_features(self, data):
+        print(data)
+        return self.processors["feature_processor"](data[self._feature_key])
+
+    def process_text(self, data):
+        sources = []
+        for col in self._text_keys:
+            tmp = []
+            for d in data:
+                if col in d:
+                    tmp.append(d[col])
+            sources.extend([tmp])
+
+        texts = []
+        for item in zip(*sources):
+            sample = Sample()
+            item = [it or "" for it in item]
+            processed_text = self.processors["text_processor"]({"text": list(item)})
+            sample.update(processed_text)
+            texts.append(sample)
+
+        texts = SampleList(texts)
+        return texts
+
+    def process_targets(self, data):
+        sample_list = SampleList()
+        targets = data[self._label_key][0]
+        sample_list.targets = targets.long()
+        return sample_list
+
+    def process_id(self, data):
+        sample_list = SampleList()
+        sample_list.id = data[self._id_key][0]
+        return sample_list
+
+    def __call__(self, data: Dict[str, Any]) -> Type[SampleList]:
+        sample_list = SampleList()
+        for func in self.pipeline:
+            sample_list.update(func(data))
+        return sample_list
+
+
+@registry.register_processor("image_with_text")
+class ImageWithTextBatchProcessor(FeaturesWithTextBatchProcessor):
+    def process_image(self, data):
+        sample_list = SampleList()
+        # images = data["image"]
+        processed_images = []
+
+        for d in data:
+            image = d["image"]
+            image = image.numpy().tobytes()
+            with Image.open(BytesIO(image), mode="r") as pil_img:
+                image = pil_img.convert("RGB")
+                processed_images.append(self.processors["image_processor"](image))
+
+        sample_list.image = torch.stack(processed_images)
+        return sample_list
+
+    @property
+    def pipeline(self):
+        pipeline = super().pipeline
+        return pipeline + [self.process_image]
